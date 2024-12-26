@@ -1,0 +1,140 @@
+trigger:
+  - main
+
+variables:
+  baseFolder: 'Implementacion/2024'
+  devFolder: '$(baseFolder)/TK-DEV'
+  qaFolder: 'QA/2024/TK-QA'
+  stagingFolder: 'Staging/2024/TK-STAGING'
+  prodFolder: 'Prod/2024/TK-PROD'
+  currentYear: '2024'
+  
+stages:
+- stage: ValidateAndCopyToQA
+  jobs:
+  - job: ProcessScripts
+    pool:
+      vmImage: 'windows-latest'
+    steps:
+    # Verificar scripts nuevos en DEV
+    - powershell: |
+        $devScripts = Get-ChildItem -Path "$(devFolder)" -Filter *.sql -Recurse
+        if ($devScripts.Count -eq 0) {
+          Write-Host "##vso[task.complete result=Skipped;]No hay scripts nuevos para procesar"
+          exit 0
+        }
+        
+        # Crear carpeta de respaldo
+        $backupFolder = "$(qaFolder)/backup_$(Build.BuildId)"
+        New-Item -Path $backupFolder -ItemType Directory -Force
+        
+        # Copiar scripts existentes a backup
+        Copy-Item -Path "$(qaFolder)/*.sql" -Destination $backupFolder -Force
+        
+        # Copiar nuevos scripts a QA
+        foreach ($script in $devScripts) {
+          $destinationPath = Join-Path "$(qaFolder)" $script.Name
+          Copy-Item -Path $script.FullName -Destination $destinationPath -Force
+          Write-Host "Copiado: $($script.Name) a QA"
+        }
+      displayName: 'Copiar Scripts de DEV a QA'
+
+    # Validar sintaxis de scripts (ejemplo)
+    - task: SqlAzureDacpacDeployment@1
+      inputs:
+        ServerName: '$(SqlServerQA)'
+        DatabaseName: '$(DatabaseQA)'
+        SqlUsername: '$(SqlUsername)'
+        SqlPassword: '$(SqlPassword)'
+        deployType: 'SqlTask'
+        SqlFile: '$(qaFolder)/*.sql'
+        IpDetectionMethod: 'AutoDetect'
+      displayName: 'Validar Scripts en QA'
+
+- stage: DeployToQA
+  dependsOn: ValidateAndCopyToQA
+  condition: succeeded()
+  jobs:
+  - deployment: Deploy
+    environment: 'qa'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: SqlAzureDacpacDeployment@1
+            inputs:
+              ServerName: '$(SqlServerQA)'
+              DatabaseName: '$(DatabaseQA)'
+              SqlUsername: '$(SqlUsername)'
+              SqlPassword: '$(SqlPassword)'
+              deployType: 'SqlTask'
+              SqlFile: '$(qaFolder)/*.sql'
+            displayName: 'Ejecutar Scripts en QA'
+
+- stage: CopyToStaging
+  dependsOn: DeployToQA
+  condition: succeeded()
+  jobs:
+  - job: CopyScripts
+    steps:
+    - powershell: |
+        $qaScripts = Get-ChildItem -Path "$(qaFolder)" -Filter *.sql
+        foreach ($script in $qaScripts) {
+          $destinationPath = Join-Path "$(stagingFolder)" $script.Name
+          Copy-Item -Path $script.FullName -Destination $destinationPath -Force
+          Write-Host "Copiado: $($script.Name) a Staging"
+        }
+      displayName: 'Copiar Scripts de QA a Staging'
+
+- stage: DeployToStaging
+  dependsOn: CopyToStaging
+  condition: succeeded()
+  jobs:
+  - deployment: Deploy
+    environment: 'staging'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: SqlAzureDacpacDeployment@1
+            inputs:
+              ServerName: '$(SqlServerStaging)'
+              DatabaseName: '$(DatabaseStaging)'
+              SqlUsername: '$(SqlUsername)'
+              SqlPassword: '$(SqlPassword)'
+              deployType: 'SqlTask'
+              SqlFile: '$(stagingFolder)/*.sql'
+
+- stage: CopyToProd
+  dependsOn: DeployToStaging
+  condition: succeeded()
+  jobs:
+  - job: CopyScripts
+    steps:
+    - powershell: |
+        $stagingScripts = Get-ChildItem -Path "$(stagingFolder)" -Filter *.sql
+        foreach ($script in $stagingScripts) {
+          $destinationPath = Join-Path "$(prodFolder)" $script.Name
+          Copy-Item -Path $script.FullName -Destination $destinationPath -Force
+          Write-Host "Copiado: $($script.Name) a Producción"
+        }
+      displayName: 'Copiar Scripts de Staging a Prod'
+
+- stage: DeployToProd
+  dependsOn: CopyToProd
+  condition: succeeded()
+  jobs:
+  - deployment: Deploy
+    environment: 'production'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: SqlAzureDacpacDeployment@1
+            inputs:
+              ServerName: '$(SqlServerProd)'
+              DatabaseName: '$(DatabaseProd)'
+              SqlUsername: '$(SqlUsername)'
+              SqlPassword: '$(SqlPassword)'
+              deployType: 'SqlTask'
+              SqlFile: '$(prodFolder)/*.sql'
