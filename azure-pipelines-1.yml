@@ -1,0 +1,17 @@
+trigger:
+- main  # Rama principal que activará la pipeline
+
+pool:
+  vmImage: 'ubuntu-latest'  # Máquina virtual para ejecutar la pipeline
+
+steps:
+- task: UsePythonVersion@0
+  inputs:
+    versionSpec: '3.x'  # Especifica la versión de Python (ejemplo: 3.9)
+
+- script: |
+    python -m venv venv
+    source venv/bin/activate
+    pip install -r requirements.txt
+    python -m unittest discover
+  displayName: 'Instalar dependencias y ejecutar pruebas'
