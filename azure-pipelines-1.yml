@@ -2,7 +2,7 @@ trigger:
 - main  # Rama principal que activará la pipeline
 
 pool:
-  vmImage: 'ubuntu-latest'  # Máquina virtual para ejecutar la pipeline
+  name: default  
 
 steps:
 - task: UsePythonVersion@0
