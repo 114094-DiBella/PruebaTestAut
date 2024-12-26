@@ -14,7 +14,9 @@ stages:
   jobs:
   - job: ProcessScripts
     pool:
-      vmImage: 'windows-latest'
+        name: Default
+        demands:
+        - agent.name -equals YOUR-COMPUTER-NAME
     steps:
     # Verificar scripts nuevos en DEV
     - powershell: |
