@@ -2,17 +2,16 @@
 # Start with a minimal pipeline that you can customize to build and deploy your code.
 # Add steps that build, run tests, deploy, and more:
 # https://aka.ms/yaml
-
 trigger:
-  - main  # o la rama que quieras usar como trigger
+  - main
 
 pool:
-  name: Default  # Este es el nombre por defecto del pool de agentes self-hosted. Ajusta según tu configuración
+  name: Default
 
 variables:
-  - group: sql-credentials  # Grupo de variables para credenciales seguras
+  - group: sql-credentials
   - name: sourceFolder
-    value: '$(System.DefaultWorkingDirectory)/SQL'  # Carpeta donde estarán tus scripts SQL
+    value: '$(System.DefaultWorkingDirectory)/SQL'
   - name: targetFolder
     value: '$(Build.ArtifactStagingDirectory)/SQL_Versioned'
 
@@ -21,10 +20,22 @@ stages:
   jobs:
   - job: ProcessAndExecuteSQL
     steps:
-    - task: UsePythonVersion@0
+    - task: PowerShell@2
+      displayName: 'Verify Python Installation'
       inputs:
-        versionSpec: '3.x'
-        addToPath: true
+        targetType: 'inline'
+        script: |
+          # Verificar si Python está instalado
+          if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
+              Write-Error "Python no está instalado o no está en el PATH"
+              exit 1
+          }
+          
+          # Mostrar versión de Python
+          python --version
+          
+          # Verificar pip
+          python -m pip --version
 
     - task: PowerShell@2
       displayName: 'Install Required Python Packages'
@@ -36,6 +47,20 @@ stages:
           pip install pywin32
 
     - task: PowerShell@2
+      displayName: 'Verify SQL Tools'
+      inputs:
+        targetType: 'inline'
+        script: |
+          # Verificar si SQLCMD está instalado
+          if (-not (Get-Command sqlcmd -ErrorAction SilentlyContinue)) {
+              Write-Error "SQLCMD no está instalado o no está en el PATH"
+              exit 1
+          }
+          
+          # Mostrar versión de SQLCMD
+          sqlcmd -?
+
+    - task: PowerShell@2
       displayName: 'Create Version Folder and Copy Files'
       inputs:
         targetType: 'inline'
@@ -43,19 +68,36 @@ stages:
           # Crear carpeta de destino con formato de versión
           $date = Get-Date -Format "yyyyMMdd"
           $buildId = "$(Build.BuildId)".PadLeft(3, '0')
-          $version = "1.0.0"  # Puedes modificar esto según tu lógica de versionado
+          $version = "1.0.0"
           $folderName = "$buildId - $date - TK-$(System.TeamProject) - V$version"
           $targetPath = Join-Path "$(targetFolder)" $folderName
           
+          # Crear la carpeta si no existe
+          if (-not (Test-Path $targetPath)) {
+              New-Item -ItemType Directory -Path $targetPath -Force
+              Write-Host "Carpeta creada: $targetPath"
+          }
+          
+          # Verificar que la carpeta origen existe
+          if (-not (Test-Path "$(sourceFolder)")) {
+              Write-Error "La carpeta origen no existe: $(sourceFolder)"
+              exit 1
+          }
+          
           # Copiar archivos SQL modificados
-          New-Item -ItemType Directory -Path $targetPath -Force
           Get-ChildItem -Path "$(sourceFolder)" -Filter *.sql -Recurse | 
             Where-Object { $_.LastWriteTime -gt (Get-Date).AddMinutes(-$(timeWindow)) } |
             ForEach-Object {
               $relativePath = $_.FullName.Substring("$(sourceFolder)".Length)
               $destination = Join-Path $targetPath $relativePath
-              New-Item -ItemType Directory -Path (Split-Path $destination) -Force
+              $destinationFolder = Split-Path $destination
+              
+              if (-not (Test-Path $destinationFolder)) {
+                  New-Item -ItemType Directory -Path $destinationFolder -Force
+              }
+              
               Copy-Item $_.FullName -Destination $destination -Force
+              Write-Host "Copiado: $($_.Name) a $destination"
             }
 
     - task: PowerShell@2
@@ -69,22 +111,37 @@ stages:
           $username = "$(sqlUsername)"
           $password = "$(sqlPassword)"
           
+          Write-Host "Buscando archivos SQL en: $(targetFolder)"
+          
           # Obtener todos los archivos SQL en orden
           $sqlFiles = Get-ChildItem -Path "$(targetFolder)" -Filter *.sql -Recurse | Sort-Object FullName
           
+          if ($sqlFiles.Count -eq 0) {
+              Write-Warning "No se encontraron archivos SQL para ejecutar"
+              exit 0
+          }
+          
+          Write-Host "Se encontraron $($sqlFiles.Count) archivos SQL"
+          
           foreach ($file in $sqlFiles) {
-              Write-Host "Executing SQL file: $($file.FullName)"
+              Write-Host "Ejecutando SQL file: $($file.FullName)"
               
-              # Ejecutar el script SQL usando SQLCMD
-              $output = sqlcmd -S $server -d $database -U $username -P $password -i $file.FullName -b
-              
-              if ($LASTEXITCODE -ne 0) {
-                  Write-Error "Error executing SQL file: $($file.FullName)"
-                  Write-Error $output
+              try {
+                  # Ejecutar el script SQL usando SQLCMD
+                  $output = sqlcmd -S $server -d $database -U $username -P $password -i $file.FullName -b
+                  
+                  if ($LASTEXITCODE -ne 0) {
+                      Write-Error "Error ejecutando SQL file: $($file.FullName)"
+                      Write-Error $output
+                      exit 1
+                  }
+                  
+                  Write-Host "Ejecutado exitosamente: $($file.Name)"
+              }
+              catch {
+                  Write-Error "Error ejecutando $($file.Name): $_"
                   exit 1
               }
-              
-              Write-Host "Successfully executed: $($file.FullName)"
           }
 
     - task: PowerShell@2
@@ -93,24 +150,31 @@ stages:
       inputs:
         targetType: 'inline'
         script: |
-          $outlook = New-Object -ComObject Outlook.Application
-          $mail = $outlook.CreateItem(0)
-          $mail.To = "adbella@hk.com.ar"
-          $mail.Subject = "Resultado de implementación: $([System.Environment]::GetEnvironmentVariable('AGENT_JOBSTATUS'))"
-          $mail.HTMLBody = @"
-          <html>
-              <body>
-                  <h2>Notificación de Implementación</h2>
-                  <p><strong>Estado: </strong>$([System.Environment]::GetEnvironmentVariable('AGENT_JOBSTATUS'))</p>
-                  <p><strong>Build:</strong> $(Build.BuildNumber)</p>
-                  <p><strong>Fecha:</strong> $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')</p>
-              </body>
-          </html>
-          "@
-          $mail.Send()
+          try {
+              $outlook = New-Object -ComObject Outlook.Application
+              $mail = $outlook.CreateItem(0)
+              $mail.To = "adbella@hk.com.ar; sgomez@hk.com.ar"
+              $mail.Subject = "Resultado de implementación: $([System.Environment]::GetEnvironmentVariable('AGENT_JOBSTATUS'))"
+              $mail.HTMLBody = @"
+              <html>
+                  <body>
+                      <h2>Notificación de Implementación</h2>
+                      <p><strong>Estado: </strong>$([System.Environment]::GetEnvironmentVariable('AGENT_JOBSTATUS'))</p>
+                      <p><strong>Build:</strong> $(Build.BuildNumber)</p>
+                      <p><strong>Fecha:</strong> $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')</p>
+                  </body>
+              </html>
+              "@
+              $mail.Send()
+              Write-Host "Notificación enviada exitosamente"
+          }
+          catch {
+              Write-Warning "Error enviando notificación: $_"
+          }
 
     - task: PublishBuildArtifacts@1
       displayName: 'Publish SQL Scripts'
+      condition: always()
       inputs:
         PathtoPublish: '$(targetFolder)'
         ArtifactName: 'SQL_Scripts'
