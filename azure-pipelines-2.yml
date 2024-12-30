@@ -2,7 +2,6 @@
 # Start with a minimal pipeline that you can customize to build and deploy your code.
 # Add steps that build, run tests, deploy, and more:
 # https://aka.ms/yaml
-
 trigger:
   - main  # o la rama que quieras usar como trigger
 
@@ -58,17 +57,34 @@ stages:
               Copy-Item $_.FullName -Destination $destination -Force
             }
 
-    - task: SqlAzureDacpacDeployment@1
+    - task: PowerShell@2
       displayName: 'Execute SQL Scripts'
       inputs:
-        azureSubscription: '$(azureSubscription)'
-        serverName: '$(sqlServerName)'
-        databaseName: '$(databaseName)'
-        sqlUsername: '$(sqlUsername)'
-        sqlPassword: '$(sqlPassword)'
-        deployType: 'SqlTask'
-        sqlFile: '$(targetFolder)/**/*.sql'
-        ipDetectionMethod: 'AutoDetect'
+        targetType: 'inline'
+        script: |
+          # Configurar la cadena de conexión
+          $server = "$(sqlServerName)"
+          $database = "$(databaseName)"
+          $username = "$(sqlUsername)"
+          $password = "$(sqlPassword)"
+          
+          # Obtener todos los archivos SQL en orden
+          $sqlFiles = Get-ChildItem -Path "$(targetFolder)" -Filter *.sql -Recurse | Sort-Object FullName
+          
+          foreach ($file in $sqlFiles) {
+              Write-Host "Executing SQL file: $($file.FullName)"
+              
+              # Ejecutar el script SQL usando SQLCMD
+              $output = sqlcmd -S $server -d $database -U $username -P $password -i $file.FullName -b
+              
+              if ($LASTEXITCODE -ne 0) {
+                  Write-Error "Error executing SQL file: $($file.FullName)"
+                  Write-Error $output
+                  exit 1
+              }
+              
+              Write-Host "Successfully executed: $($file.FullName)"
+          }
 
     - task: PowerShell@2
       displayName: 'Send Notification Email'
