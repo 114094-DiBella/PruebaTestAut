@@ -2,11 +2,12 @@
 # Start with a minimal pipeline that you can customize to build and deploy your code.
 # Add steps that build, run tests, deploy, and more:
 # https://aka.ms/yaml
+
 trigger:
   - main  # o la rama que quieras usar como trigger
 
 pool:
-  vmImage: 'windows-latest'  # Usando Windows ya que tu script usa características específicas de Windows
+  name: Default  # Este es el nombre por defecto del pool de agentes self-hosted. Ajusta según tu configuración
 
 variables:
   - group: sql-credentials  # Grupo de variables para credenciales seguras
