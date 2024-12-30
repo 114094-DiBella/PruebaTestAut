@@ -1,0 +1,100 @@
+# Starter pipeline
+# Start with a minimal pipeline that you can customize to build and deploy your code.
+# Add steps that build, run tests, deploy, and more:
+# https://aka.ms/yaml
+
+trigger:
+  - main  # o la rama que quieras usar como trigger
+
+pool:
+  vmImage: 'windows-latest'  # Usando Windows ya que tu script usa características específicas de Windows
+
+variables:
+  - group: sql-credentials  # Grupo de variables para credenciales seguras
+  - name: sourceFolder
+    value: '$(System.DefaultWorkingDirectory)/SQL'  # Carpeta donde estarán tus scripts SQL
+  - name: targetFolder
+    value: '$(Build.ArtifactStagingDirectory)/SQL_Versioned'
+
+stages:
+- stage: Deploy
+  jobs:
+  - job: ProcessAndExecuteSQL
+    steps:
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: '3.x'
+        addToPath: true
+
+    - task: PowerShell@2
+      displayName: 'Install Required Python Packages'
+      inputs:
+        targetType: 'inline'
+        script: |
+          python -m pip install --upgrade pip
+          pip install pyodbc
+          pip install pywin32
+
+    - task: PowerShell@2
+      displayName: 'Create Version Folder and Copy Files'
+      inputs:
+        targetType: 'inline'
+        script: |
+          # Crear carpeta de destino con formato de versión
+          $date = Get-Date -Format "yyyyMMdd"
+          $buildId = "$(Build.BuildId)".PadLeft(3, '0')
+          $version = "1.0.0"  # Puedes modificar esto según tu lógica de versionado
+          $folderName = "$buildId - $date - TK-$(System.TeamProject) - V$version"
+          $targetPath = Join-Path "$(targetFolder)" $folderName
+          
+          # Copiar archivos SQL modificados
+          New-Item -ItemType Directory -Path $targetPath -Force
+          Get-ChildItem -Path "$(sourceFolder)" -Filter *.sql -Recurse | 
+            Where-Object { $_.LastWriteTime -gt (Get-Date).AddMinutes(-$(timeWindow)) } |
+            ForEach-Object {
+              $relativePath = $_.FullName.Substring("$(sourceFolder)".Length)
+              $destination = Join-Path $targetPath $relativePath
+              New-Item -ItemType Directory -Path (Split-Path $destination) -Force
+              Copy-Item $_.FullName -Destination $destination -Force
+            }
+
+    - task: SqlAzureDacpacDeployment@1
+      displayName: 'Execute SQL Scripts'
+      inputs:
+        azureSubscription: '$(azureSubscription)'
+        serverName: '$(sqlServerName)'
+        databaseName: '$(databaseName)'
+        sqlUsername: '$(sqlUsername)'
+        sqlPassword: '$(sqlPassword)'
+        deployType: 'SqlTask'
+        sqlFile: '$(targetFolder)/**/*.sql'
+        ipDetectionMethod: 'AutoDetect'
+
+    - task: PowerShell@2
+      displayName: 'Send Notification Email'
+      condition: always()
+      inputs:
+        targetType: 'inline'
+        script: |
+          $outlook = New-Object -ComObject Outlook.Application
+          $mail = $outlook.CreateItem(0)
+          $mail.To = "adbella@hk.com.ar"
+          $mail.Subject = "Resultado de implementación: $([System.Environment]::GetEnvironmentVariable('AGENT_JOBSTATUS'))"
+          $mail.HTMLBody = @"
+          <html>
+              <body>
+                  <h2>Notificación de Implementación</h2>
+                  <p><strong>Estado: </strong>$([System.Environment]::GetEnvironmentVariable('AGENT_JOBSTATUS'))</p>
+                  <p><strong>Build:</strong> $(Build.BuildNumber)</p>
+                  <p><strong>Fecha:</strong> $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')</p>
+              </body>
+          </html>
+          "@
+          $mail.Send()
+
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish SQL Scripts'
+      inputs:
+        PathtoPublish: '$(targetFolder)'
+        ArtifactName: 'SQL_Scripts'
+        publishLocation: 'Container'
